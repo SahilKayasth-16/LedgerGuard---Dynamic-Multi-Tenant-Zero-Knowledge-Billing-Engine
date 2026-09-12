@@ -7,7 +7,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "tsx src/tests/security.test.ts && tsx src/tests/tenantConnectionManager.test.ts"
+    "test": "tsx src/tests/security.test.ts && tsx src/tests/tenantConnectionManager.test.ts && tsx src/tests/tenantGateway.test.ts"
   },
   "keywords": [],
   "author": "",
