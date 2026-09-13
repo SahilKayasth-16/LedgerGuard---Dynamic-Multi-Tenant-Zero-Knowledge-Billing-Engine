@@ -5,6 +5,7 @@ import { getTenantConfig } from '../config/tenantConfig';
 class TenantConnectionManager {
   private connectionCache: Map<string, mongoose.Connection> = new Map();
   private pendingInitCache: Map<string, Promise<mongoose.Connection>> = new Map();
+  private simulatedFailures: Set<string> = new Set();
 
   /**
    * Retrieves or establishes a cached, tenant-isolated Mongoose connection.
@@ -16,6 +17,11 @@ class TenantConnectionManager {
 
     // 1. Resolve tenant configuration
     const tenantConfig = getTenantConfig(tenantId);
+
+    // Controlled database failure simulation for resiliency testing
+    if (this.simulatedFailures.has(tenantId)) {
+      throw new Error(`Failed to establish database connection for tenant: ${tenantId}`);
+    }
 
     // 2. Check if a healthy connection exists in cache
     const existingConn = this.connectionCache.get(tenantId);
@@ -65,6 +71,30 @@ class TenantConnectionManager {
   }
 
   /**
+   * Simulates a database failure for a specific tenant (for resiliency testing).
+   */
+  public simulateFailure(tenantId: string): void {
+    this.simulatedFailures.add(tenantId);
+    const conn = this.connectionCache.get(tenantId);
+    if (conn) {
+      conn.close().catch(() => {});
+      this.connectionCache.delete(tenantId);
+    }
+    this.pendingInitCache.delete(tenantId);
+  }
+
+  /**
+   * Clears simulated failure for a specific tenant or all tenants.
+   */
+  public clearSimulatedFailure(tenantId?: string): void {
+    if (tenantId) {
+      this.simulatedFailures.delete(tenantId);
+    } else {
+      this.simulatedFailures.clear();
+    }
+  }
+
+  /**
    * Disconnects a specific tenant and removes it from cache.
    */
   public async disconnectTenant(tenantId: string): Promise<void> {
@@ -92,6 +122,7 @@ class TenantConnectionManager {
     }
     this.connectionCache.clear();
     this.pendingInitCache.clear();
+    this.simulatedFailures.clear();
     console.log('[MongoDB] All tenant connections closed.');
   }
 
@@ -108,4 +139,3 @@ class TenantConnectionManager {
 }
 
 export const tenantConnectionManager = new TenantConnectionManager();
-

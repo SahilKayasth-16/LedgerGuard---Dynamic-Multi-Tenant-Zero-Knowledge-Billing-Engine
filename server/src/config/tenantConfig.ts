@@ -19,6 +19,12 @@ const TENANT_REGISTRY: Record<string, TenantConfig> = {
     name: 'Company B Inc',
     status: 'active',
   },
+  'tenant-disabled': {
+    tenantId: 'tenant-disabled',
+    databaseName: 'ledgerguard_tenant_disabled',
+    name: 'Disabled Corp',
+    status: 'inactive',
+  },
 };
 
 export const getTenantConfig = (tenantId: string): TenantConfig => {
@@ -38,4 +44,3 @@ export const getTenantConfig = (tenantId: string): TenantConfig => {
 
   return tenantConfig;
 };
-
