@@ -12,7 +12,19 @@ export const Sidebar: React.FC = () => {
   ];
 
   return (
-    <aside style={{ width: '250px', backgroundColor: '#0F172A', color: '#F8FAFC', minHeight: '100vh', padding: '1.5rem 1rem', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+    <aside
+      style={{
+        width: '250px',
+        backgroundColor: '#0F172A',
+        color: '#F8FAFC',
+        minHeight: '100vh',
+        padding: '1.5rem 1rem',
+        boxSizing: 'border-box',
+        display: 'flex',
+        flexDirection: 'column',
+        justifyContent: 'space-between',
+      }}
+    >
       <div>
         <div style={{ paddingBottom: '1.5rem', marginBottom: '1.5rem', borderBottom: '1px solid #1E293B' }}>
           <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#818CF8', margin: 0, letterSpacing: '-0.02em' }}>

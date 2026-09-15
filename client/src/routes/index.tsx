@@ -1,6 +1,7 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import LoginPage from '../pages/LoginPage';
+import RegisterPage from '../pages/RegisterPage';
 import OverviewPage from '../pages/OverviewPage';
 import LedgerPage from '../pages/LedgerPage';
 import AnalyticsPage from '../pages/AnalyticsPage';
@@ -12,6 +13,7 @@ import PublicOnlyRoute from './PublicOnlyRoute';
 const AppRoutes: React.FC = () => {
   return (
     <Routes>
+      {/* Public routes (Only accessible when NOT logged in) */}
       <Route
         path="/login"
         element={
@@ -20,6 +22,16 @@ const AppRoutes: React.FC = () => {
           </PublicOnlyRoute>
         }
       />
+      <Route
+        path="/register"
+        element={
+          <PublicOnlyRoute>
+            <RegisterPage />
+          </PublicOnlyRoute>
+        }
+      />
+
+      {/* Protected tenant routes */}
       <Route element={<ProtectedRoute />}>
         <Route path="/dashboard" element={<DashboardLayout />}>
           <Route index element={<Navigate to="/dashboard/overview" replace />} />
@@ -29,8 +41,10 @@ const AppRoutes: React.FC = () => {
           <Route path="settings" element={<SettingsPage />} />
         </Route>
       </Route>
-      <Route path="/" element={<Navigate to="/dashboard/overview" replace />} />
-      <Route path="*" element={<Navigate to="/dashboard/overview" replace />} />
+
+      {/* Default fallback: Always open Login page first when application runs */}
+      <Route path="/" element={<Navigate to="/login" replace />} />
+      <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
   );
 };
