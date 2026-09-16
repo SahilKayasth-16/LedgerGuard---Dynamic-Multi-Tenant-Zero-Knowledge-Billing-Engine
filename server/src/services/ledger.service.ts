@@ -1,0 +1,69 @@
+import mongoose from 'mongoose';
+import { getLedgerModel, ILedgerEntry, LedgerEntryType } from '../models/ledger.model';
+
+export interface CreateLedgerDTO {
+  eventId: string;
+  type: LedgerEntryType;
+  amount: number;
+  currency: string;
+  description?: string;
+  metadata?: Record<string, any>;
+}
+
+export class LedgerService {
+  /**
+   * Creates a new ledger entry in the tenant's isolated database.
+   * `tenantId` is strictly injected from the server's authenticated context.
+   */
+  public async createLedgerEntry(
+    tenantDb: mongoose.Connection,
+    tenantId: string,
+    data: CreateLedgerDTO
+  ): Promise<ILedgerEntry> {
+    const LedgerModel = getLedgerModel(tenantDb);
+
+    const entry = new LedgerModel({
+      eventId: data.eventId,
+      tenantId: tenantId, // Strict JWT tenant identity authority
+      type: data.type,
+      amount: data.amount,
+      currency: data.currency ? data.currency.toUpperCase() : 'INR',
+      description: data.description,
+      status: 'pending',
+      metadata: data.metadata || {},
+    });
+
+    return await entry.save();
+  }
+
+  /**
+   * Retrieves all ledger entries belonging strictly to the authenticated tenant.
+   */
+  public async getLedgerEntries(
+    tenantDb: mongoose.Connection,
+    tenantId: string
+  ): Promise<ILedgerEntry[]> {
+    const LedgerModel = getLedgerModel(tenantDb);
+    return await LedgerModel.find({ tenantId }).sort({ createdAt: -1 }).select('-__v');
+  }
+
+  /**
+   * Retrieves a single ledger entry by ID, enforcing tenant ownership boundaries.
+   */
+  public async getLedgerEntryById(
+    tenantDb: mongoose.Connection,
+    tenantId: string,
+    id: string
+  ): Promise<ILedgerEntry | null> {
+    const LedgerModel = getLedgerModel(tenantDb);
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return null;
+    }
+
+    return await LedgerModel.findOne({ _id: id, tenantId }).select('-__v');
+  }
+}
+
+export const ledgerService = new LedgerService();
+
