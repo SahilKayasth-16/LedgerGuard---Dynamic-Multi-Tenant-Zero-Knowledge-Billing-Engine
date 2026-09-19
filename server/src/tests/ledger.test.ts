@@ -80,6 +80,12 @@ async function runLedgerTests() {
       role: 'ADMIN',
     });
 
+    const testPrefix = `evt-d8-${Date.now()}`;
+    const event1 = `${testPrefix}-001`;
+    const event2 = `${testPrefix}-002`;
+    const event3 = `${testPrefix}-003`;
+    const eventB1 = `${testPrefix}-b-001`;
+
     // 1. Authenticated tenant can create a ledger entry
     const resCreateA = await request(
       server,
@@ -87,7 +93,7 @@ async function runLedgerTests() {
       '/api/ledger',
       { Authorization: `Bearer ${tokenA}` },
       {
-        eventId: 'evt-001',
+        eventId: event1,
         type: 'debit',
         amount: 499.5,
         currency: 'INR',
@@ -99,7 +105,7 @@ async function runLedgerTests() {
     assert(
       resCreateA.status === 201 &&
         resCreateA.body.success === true &&
-        resCreateA.body.data.eventId === 'evt-001' &&
+        resCreateA.body.data.eventId === event1 &&
         resCreateA.body.data.tenantId === 'tenant-company-a' &&
         resCreateA.body.data.type === 'debit' &&
         resCreateA.body.data.amount === 499.5 &&
@@ -113,7 +119,7 @@ async function runLedgerTests() {
 
     // 2. Unauthenticated request is rejected
     const resUnauth = await request(server, 'POST', '/api/ledger', {}, {
-      eventId: 'evt-002',
+      eventId: event2,
       type: 'credit',
       amount: 100,
       currency: 'USD',
@@ -130,7 +136,7 @@ async function runLedgerTests() {
       '/api/ledger',
       { Authorization: `Bearer ${tokenA}` },
       {
-        eventId: 'evt-003',
+        eventId: event3,
         tenantId: 'tenant-company-b', // Client injection attempt
         type: 'credit',
         amount: 250,
@@ -152,7 +158,7 @@ async function runLedgerTests() {
       '/api/ledger',
       { Authorization: `Bearer ${tokenB}` },
       {
-        eventId: 'evt-b-001',
+        eventId: eventB1,
         type: 'credit',
         amount: 1200,
         currency: 'USD',

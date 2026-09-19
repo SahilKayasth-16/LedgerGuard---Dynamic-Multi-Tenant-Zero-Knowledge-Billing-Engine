@@ -1,11 +1,23 @@
 import React, { useEffect, useState } from 'react';
 import { ledgerService } from '../services/ledger.service';
 import type { LedgerEntry } from '../services/ledger.service';
+import { Notification } from '../components/Notification';
+import { useNotification } from '../context/NotificationContext';
 
 export const LedgerPage: React.FC = () => {
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Quick transaction test state
+  const [showQuickForm, setShowQuickForm] = useState<boolean>(false);
+  const [testEventId, setTestEventId] = useState<string>('');
+  const [testType, setTestType] = useState<'debit' | 'credit'>('debit');
+  const [testAmount, setTestAmount] = useState<string>('299');
+  const [testDescription, setTestDescription] = useState<string>('');
+  const [submittingTx, setSubmittingTx] = useState<boolean>(false);
+
+  const { showSuccess, showDuplicate, showError, setSubmitting, clearNotification } = useNotification();
 
   const fetchLedgerData = async () => {
     setLoading(true);
@@ -27,6 +39,48 @@ export const LedgerPage: React.FC = () => {
   useEffect(() => {
     fetchLedgerData();
   }, []);
+
+  const handleQuickSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!testEventId.trim()) {
+      showError('Please provide an event ID.');
+      return;
+    }
+
+    const numAmount = parseFloat(testAmount);
+    if (isNaN(numAmount) || numAmount <= 0) {
+      showError('Amount must be a positive number.');
+      return;
+    }
+
+    setSubmittingTx(true);
+    setSubmitting('Processing transaction with idempotency verification...');
+
+    try {
+      const response = await ledgerService.createLedgerEntry({
+        eventId: testEventId.trim(),
+        type: testType,
+        amount: numAmount,
+        currency: 'INR',
+        description: testDescription.trim() || undefined,
+      });
+
+      if (response.duplicate) {
+        showDuplicate('This billing event has already been processed.');
+      } else {
+        showSuccess('Ledger transaction created successfully.');
+        setTestDescription('');
+      }
+
+      await fetchLedgerData();
+    } catch (err: any) {
+      const errorMsg =
+        err.response?.data?.message || 'Unable to process the transaction. Please try again.';
+      showError(errorMsg);
+    } finally {
+      setSubmittingTx(false);
+    }
+  };
 
   const getTypeBadgeStyle = (type: 'debit' | 'credit'): React.CSSProperties => {
     if (type === 'credit') {
@@ -126,28 +180,182 @@ export const LedgerPage: React.FC = () => {
             Billing Ledger
           </h1>
           <p style={{ color: '#64748B', fontSize: '0.875rem', margin: 0 }}>
-            Tenant-isolated financial transaction records
+            Tenant-isolated financial transaction records with idempotency guarantees
           </p>
         </div>
 
-        <button
-          onClick={fetchLedgerData}
-          disabled={loading}
+        <div style={{ display: 'flex', gap: '0.75rem' }}>
+          <button
+            onClick={() => {
+              clearNotification();
+              setShowQuickForm(!showQuickForm);
+            }}
+            style={{
+              padding: '0.5rem 1rem',
+              backgroundColor: showQuickForm ? '#F1F5F9' : '#4F46E5',
+              color: showQuickForm ? '#334155' : '#FFFFFF',
+              border: showQuickForm ? '1px solid #CBD5E1' : 'none',
+              borderRadius: '6px',
+              fontSize: '0.875rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            {showQuickForm ? 'Hide Submit Form' : '+ Test Idempotent Transaction'}
+          </button>
+
+          <button
+            onClick={fetchLedgerData}
+            disabled={loading}
+            style={{
+              padding: '0.5rem 1rem',
+              backgroundColor: '#FFFFFF',
+              color: '#334155',
+              border: '1px solid #CBD5E1',
+              borderRadius: '6px',
+              fontSize: '0.875rem',
+              fontWeight: 500,
+              cursor: loading ? 'not-allowed' : 'pointer',
+              transition: 'background-color 0.15s ease',
+            }}
+          >
+            {loading ? 'Refreshing...' : 'Refresh Records'}
+          </button>
+        </div>
+      </div>
+
+      {/* REUSABLE NOTIFICATION BANNER */}
+      <Notification />
+
+      {/* QUICK TRANSACTION TEST FORM */}
+      {showQuickForm && (
+        <div
           style={{
-            padding: '0.5rem 1rem',
             backgroundColor: '#FFFFFF',
-            color: '#334155',
-            border: '1px solid #CBD5E1',
-            borderRadius: '6px',
-            fontSize: '0.875rem',
-            fontWeight: 500,
-            cursor: loading ? 'not-allowed' : 'pointer',
-            transition: 'background-color 0.15s ease',
+            border: '1px solid #E2E8F0',
+            borderRadius: '8px',
+            padding: '1.5rem',
+            marginBottom: '1.5rem',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
           }}
         >
-          {loading ? 'Refreshing...' : 'Refresh Records'}
-        </button>
-      </div>
+          <h2 style={{ fontSize: '1rem', fontWeight: 600, color: '#1E293B', marginTop: 0, marginBottom: '1rem' }}>
+            Submit Test Billing Event (Idempotency Demo)
+          </h2>
+          <form onSubmit={handleQuickSubmit} style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', alignItems: 'flex-end' }}>
+            <div style={{ flex: '1 1 200px' }}>
+              <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#475569', marginBottom: '0.35rem' }}>
+                Event ID (Unique Per Tenant)
+              </label>
+              <input
+                type="text"
+                value={testEventId}
+                onChange={(e) => setTestEventId(e.target.value)}
+                placeholder="e.g. inv_march_001"
+                disabled={submittingTx}
+                style={{
+                  width: '100%',
+                  padding: '0.5rem 0.75rem',
+                  border: '1px solid #CBD5E1',
+                  borderRadius: '6px',
+                  fontSize: '0.875rem',
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
+
+            <div style={{ width: '120px' }}>
+              <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#475569', marginBottom: '0.35rem' }}>
+                Type
+              </label>
+              <select
+                value={testType}
+                onChange={(e) => setTestType(e.target.value as 'debit' | 'credit')}
+                disabled={submittingTx}
+                style={{
+                  width: '100%',
+                  padding: '0.5rem 0.75rem',
+                  border: '1px solid #CBD5E1',
+                  borderRadius: '6px',
+                  fontSize: '0.875rem',
+                  backgroundColor: '#FFFFFF',
+                  boxSizing: 'border-box',
+                }}
+              >
+                <option value="debit">DEBIT</option>
+                <option value="credit">CREDIT</option>
+              </select>
+            </div>
+
+            <div style={{ width: '120px' }}>
+              <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#475569', marginBottom: '0.35rem' }}>
+                Amount (INR)
+              </label>
+              <input
+                type="number"
+                value={testAmount}
+                onChange={(e) => setTestAmount(e.target.value)}
+                disabled={submittingTx}
+                min="0.01"
+                step="0.01"
+                style={{
+                  width: '100%',
+                  padding: '0.5rem 0.75rem',
+                  border: '1px solid #CBD5E1',
+                  borderRadius: '6px',
+                  fontSize: '0.875rem',
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
+
+            <div style={{ flex: '1 1 200px' }}>
+              <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#475569', marginBottom: '0.35rem' }}>
+                Description (Optional)
+              </label>
+              <input
+                type="text"
+                value={testDescription}
+                onChange={(e) => setTestDescription(e.target.value)}
+                placeholder="e.g. Cloud Compute Charge"
+                disabled={submittingTx}
+                style={{
+                  width: '100%',
+                  padding: '0.5rem 0.75rem',
+                  border: '1px solid #CBD5E1',
+                  borderRadius: '6px',
+                  fontSize: '0.875rem',
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
+
+            <div>
+              <button
+                type="submit"
+                disabled={submittingTx}
+                style={{
+                  padding: '0.55rem 1.25rem',
+                  backgroundColor: submittingTx ? '#94A3B8' : '#2563EB',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontSize: '0.875rem',
+                  fontWeight: 600,
+                  cursor: submittingTx ? 'not-allowed' : 'pointer',
+                  transition: 'background-color 0.15s ease',
+                }}
+              >
+                {submittingTx ? 'Submitting...' : 'Submit Transaction'}
+              </button>
+            </div>
+          </form>
+          <p style={{ margin: '0.75rem 0 0 0', fontSize: '0.75rem', color: '#64748B' }}>
+            Tip: Submit once with an Event ID to create it. Submit again with the exact same Event ID to witness idempotency in action!
+          </p>
+        </div>
+      )}
 
       {/* STATE 1: LOADING */}
       {loading && (

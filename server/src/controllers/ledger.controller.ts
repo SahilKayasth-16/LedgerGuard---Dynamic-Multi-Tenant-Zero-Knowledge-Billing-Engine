@@ -85,7 +85,7 @@ export const createLedgerEntry = async (req: Request, res: Response): Promise<vo
   }
 
   try {
-    const entry = await ledgerService.createLedgerEntry(req.tenantDb, authenticatedTenantId, {
+    const result = await ledgerService.createLedgerEntry(req.tenantDb, authenticatedTenantId, {
       eventId: eventId.trim(),
       type,
       amount,
@@ -94,9 +94,16 @@ export const createLedgerEntry = async (req: Request, res: Response): Promise<vo
       metadata,
     });
 
-    res.status(201).json({
+    const entry = result.entry;
+    const statusCode = result.duplicate ? 200 : 201;
+    const message = result.duplicate
+      ? 'Ledger event has already been processed.'
+      : 'Ledger entry created successfully.';
+
+    res.status(statusCode).json({
       success: true,
-      message: 'Ledger entry created successfully.',
+      duplicate: result.duplicate,
+      message,
       data: {
         id: entry._id,
         eventId: entry.eventId,

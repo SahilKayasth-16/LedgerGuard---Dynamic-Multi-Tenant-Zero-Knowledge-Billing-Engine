@@ -36,6 +36,13 @@ export interface CreateLedgerPayload {
   metadata?: Record<string, any>;
 }
 
+export interface CreateLedgerResponse {
+  success: boolean;
+  duplicate: boolean;
+  message: string;
+  data: LedgerEntry;
+}
+
 export const ledgerService = {
   getLedgerEntries: async (): Promise<LedgerEntry[]> => {
     const response = await api.get<LedgerListResponse>('/ledger');
@@ -53,12 +60,11 @@ export const ledgerService = {
     return response.data.data;
   },
 
-  createLedgerEntry: async (payload: CreateLedgerPayload): Promise<LedgerEntry> => {
-    const response = await api.post<LedgerSingleResponse>('/ledger', payload);
+  createLedgerEntry: async (payload: CreateLedgerPayload): Promise<CreateLedgerResponse> => {
+    const response = await api.post<CreateLedgerResponse>('/ledger', payload);
     if (!response.data.success || !response.data.data) {
-      throw new Error(response.data.message || 'Failed to create ledger entry');
+      throw new Error(response.data.message || 'Failed to process ledger entry');
     }
-    return response.data.data;
+    return response.data;
   },
 };
-

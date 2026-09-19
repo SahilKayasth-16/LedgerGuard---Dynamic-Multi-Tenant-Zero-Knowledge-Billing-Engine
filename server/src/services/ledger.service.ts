@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { getLedgerModel, ILedgerEntry, LedgerEntryType } from '../models/ledger.model';
+import { idempotencyService, IdempotencyResult } from './idempotency.service';
 
 export interface CreateLedgerDTO {
   eventId: string;
@@ -12,28 +13,15 @@ export interface CreateLedgerDTO {
 
 export class LedgerService {
   /**
-   * Creates a new ledger entry in the tenant's isolated database.
+   * Creates or resolves a ledger entry idempotently in the tenant's isolated database.
    * `tenantId` is strictly injected from the server's authenticated context.
    */
   public async createLedgerEntry(
     tenantDb: mongoose.Connection,
     tenantId: string,
     data: CreateLedgerDTO
-  ): Promise<ILedgerEntry> {
-    const LedgerModel = getLedgerModel(tenantDb);
-
-    const entry = new LedgerModel({
-      eventId: data.eventId,
-      tenantId: tenantId, // Strict JWT tenant identity authority
-      type: data.type,
-      amount: data.amount,
-      currency: data.currency ? data.currency.toUpperCase() : 'INR',
-      description: data.description,
-      status: 'pending',
-      metadata: data.metadata || {},
-    });
-
-    return await entry.save();
+  ): Promise<IdempotencyResult> {
+    return await idempotencyService.processIdempotentLedgerEntry(tenantDb, tenantId, data);
   }
 
   /**
@@ -66,4 +54,3 @@ export class LedgerService {
 }
 
 export const ledgerService = new LedgerService();
-

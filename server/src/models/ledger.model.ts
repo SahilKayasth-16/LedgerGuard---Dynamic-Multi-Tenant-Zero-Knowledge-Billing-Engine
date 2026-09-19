@@ -84,6 +84,9 @@ const LedgerSchema: Schema = new Schema(
   }
 );
 
+// Compound unique index enforcing tenant-aware idempotency on eventId
+LedgerSchema.index({ tenantId: 1, eventId: 1 }, { unique: true });
+
 export const getLedgerModel = (conn: mongoose.Connection): Model<ILedgerEntry> => {
   if (conn.models.LedgerEntry) {
     return conn.models.LedgerEntry as Model<ILedgerEntry>;
