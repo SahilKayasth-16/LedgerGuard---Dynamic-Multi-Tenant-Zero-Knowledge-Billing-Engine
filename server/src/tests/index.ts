@@ -9,16 +9,21 @@ const testFiles = [
   'week1Audit.test.ts',
   'ledger.test.ts',
   'idempotency.test.ts',
+  'redisLock.test.ts',
 ];
 
 console.log(`\n>>> EXECUTING ALL ${testFiles.length} TEST SUITES FOR LEDGERGUARD <<<\n`);
 
 for (const file of testFiles) {
   const filePath = path.join(__dirname, file);
-  const result = spawnSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['tsx', filePath], {
-    stdio: 'inherit',
-    shell: true,
-  });
+  const result = spawnSync(
+    process.platform === 'win32' ? 'npx.cmd' : 'npx',
+    ['tsx', `"${filePath}"`],
+    {
+      stdio: 'inherit',
+      shell: true,
+    }
+  );
 
   if (result.status !== 0) {
     console.error(`\n❌ Test suite failed in: ${file}`);
@@ -27,6 +32,6 @@ for (const file of testFiles) {
 }
 
 console.log('\n================================================================');
-console.log('🎉 ALL TEST SUITES PASSED SUCCESSFULLY! (73+ ASSERTIONS)');
+console.log('🎉 ALL TEST SUITES PASSED SUCCESSFULLY! (87+ ASSERTIONS)');
 console.log('================================================================\n');
 

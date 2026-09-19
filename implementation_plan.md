@@ -1,126 +1,176 @@
-# Implementation Plan — Day 9: Unique Event IDs + Idempotency Foundation
+# Implementation Plan — Day 10: Redis Distributed Locks
 
-Day 9 establishes **database-enforced idempotency** for **LedgerGuard's** billing engine.
+Day 10 introduces **Redis distributed locking** to coordinate concurrent processing of billing events across LedgerGuard's multi-tenant architecture.
 
 ---
 
-## Technical Goal
+## Technical Goal & Concurrency Flow
 
-Guarantee that within any tenant, the same billing event ID (`eventId`) cannot produce more than one committed ledger entry, while ensuring different tenants can process identical `eventId` values independently without collision.
+The Redis lock coordinates concurrent requests for the **same tenant + event ID**, preventing race conditions before the event reaches the database:
 
 ```text
-Request (POST /api/ledger)
-   ↓
-JWT Authentication (JWT tenantId = company-a)
-   ↓
-Tenant Connection Manager (Tenant DB)
-   ↓
-Application Pre-Check (findOne { tenantId, eventId })
-   ├── Exists? → Return 200 OK { duplicate: true, data: entry }
-   └── Not Found? → Attempt insert
-            ↓
-Database Compound Unique Index { tenantId: 1, eventId: 1 }
-   ├── Insert Success → Return 201 Created { duplicate: false, data: entry }
-   └── Race Condition (E11000 Duplicate Key Error)
-            ↓
-     Catch E11000 Error → Re-query entry → Return 200 OK { duplicate: true, data: entry }
+POST /api/ledger
+        ↓
+JWT Authentication (Verified req.user.tenantId)
+        ↓
+Tenant Connection Manager (Tenant Database)
+        ↓
+tenantId + eventId
+        ↓
+Acquire Redis Lock (SET ledger:lock:{tenantId}:{eventId} {uniqueToken} NX PX {ttl})
+        ↓
+┌──────────────────────────────┐
+│ Lock Acquired?               │
+└──────────────┬───────────────┘
+               │
+        ┌──────┴──────┐
+        │             │
+       YES            NO (Another request processing)
+        │             │
+        ↓             ↓
+Existing Event?   Return 409 Conflict
+        │         { code: "EVENT_PROCESSING",
+   ┌────┴────┐      message: "This billing event is currently being processed." }
+   │         │
+  YES        NO
+   │         │
+   ↓         ↓
+Return     Insert
+Existing   Ledger Entry
+   │         │
+   └────┬────┘
+        ↓
+   finally: Atomic Release Lock (Lua compare-and-delete)
+        ↓
+     Response (201 Created or 200 OK)
 ```
+
+If Redis is temporarily unavailable, fail safely with `503 Service Unavailable` (`"Ledger processing is temporarily unavailable."`) without exposing raw Redis errors or bypassing locking.
 
 ---
 
 ## User Review Required
 
 > [!IMPORTANT]
-> **Preserving Architectural Scope**:
-> - **Idempotency Strategy**: Combination of application-level pre-check (`findOne`), compound database unique index (`{ tenantId: 1, eventId: 1 }`), and graceful MongoDB `E11000` duplicate key race condition recovery.
-> - **Security Rule**: `tenantId` is derived strictly from verified RS256 JWT context (`req.user.tenantId`). Request body overrides are ignored.
-> - **API Contract**:
->   - First creation: `201 Created` with `{ success: true, duplicate: false, message: "...", data: {...} }`.
->   - Duplicate request: `200 OK` with `{ success: true, duplicate: true, message: "Ledger event has already been processed.", data: {...} }`.
-> - **Strict Scope Control**: Redis distributed locks, MongoDB transactions, ACID multi-document session locks, and background workers are **NOT** implemented today (scheduled for Days 10–12).
-
----
-
-## Open Questions
-
-None. All criteria for Day 9 are clearly specified.
+> **Separation of Concerns: Redis Locking vs Idempotency Guarantee**:
+> - **Redis Distributed Lock**: Concurrency coordination mechanism answering *"Who can process this event right now?"*
+> - **MongoDB Compound Unique Index (`{ tenantId: 1, eventId: 1 }`)**: Day 9 idempotency guarantee answering *"Can this event exist more than once?"*
+> - **Strict Boundaries Preserved**: MongoDB multi-document transactions and sessions belong to **Day 11**. Distributed queues/workers and payment processing remain strictly out of scope for Day 10.
 
 ---
 
 ## Proposed Changes
 
-### Server (`server/`)
+### Configuration Layer
 
-#### [MODIFY] [ledger.model.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/models/ledger.model.ts)
-* Add compound unique index to `LedgerSchema`:
-  ```typescript
-  LedgerSchema.index({ tenantId: 1, eventId: 1 }, { unique: true });
+#### [MODIFY] [env.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/config/env.ts)
+- Add `redisUrl`: reads `process.env.REDIS_URL || 'redis://localhost:6379'`.
+- Add `redisLockTtlMs`: reads `process.env.REDIS_LOCK_TTL_MS || '10000'`, validating it is a finite number > 0.
+
+#### [MODIFY] [.env.example](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/.env.example)
+- Add safe placeholder:
+  ```env
+  REDIS_URL=redis://localhost:6379
+  REDIS_LOCK_TTL_MS=10000
   ```
-* This ensures MongoDB enforces tenant-aware uniqueness across concurrent writes.
 
-#### [NEW] [idempotency.service.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/services/idempotency.service.ts)
-* Create `IdempotencyService` implementing `processIdempotentLedgerEntry`:
-  1. Performs application-level lookup (`findOne({ tenantId, eventId })`).
-  2. If found, returns `{ duplicate: true, entry }`.
-  3. If not found, attempts `new LedgerModel(...).save()`.
-  4. Catches `E11000` (code `11000` or duplicate key error), re-queries `{ tenantId, eventId }`, and returns `{ duplicate: true, entry }`.
-
-#### [MODIFY] [ledger.service.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/services/ledger.service.ts)
-* Delegate ledger entry creation to `idempotencyService.processIdempotentLedgerEntry`.
-
-#### [MODIFY] [ledger.controller.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/controllers/ledger.controller.ts)
-* Update `createLedgerEntry`:
-  - If `result.duplicate === false`: Return `201 Created` with `duplicate: false`.
-  - If `result.duplicate === true`: Return `200 OK` with `duplicate: true` and message `"Ledger event has already been processed."`.
-
-#### [NEW] [tests/idempotency.test.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/tests/idempotency.test.ts)
-* Create comprehensive test suite verifying:
-  1. First event request creates record (`201 Created`, `duplicate: false`).
-  2. Repeated event request returns existing entry (`200 OK`, `duplicate: true`) without creating a duplicate in DB (DB count = 1).
-  3. Different event IDs create separate entries.
-  4. Same `eventId` used by different tenants coexists independently (`company-a` + `event-001` vs `company-b` + `event-001`).
-  5. Request body `tenantId` override attempt is ignored.
-  6. **Concurrent Stress Test**: Sends 10 concurrent duplicate requests (`Promise.all`) with identical `tenantId` and `eventId`. Asserts DB count is **EXACTLY 1**.
-  7. **High Concurrency Stress Test**: Sends 50 concurrent duplicate requests to verify zero duplicate index violations or unhandled crashes.
-
-#### [MODIFY] [package.json](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/package.json)
-* Include `tsx src/tests/idempotency.test.ts` in `npm test`.
+#### [MODIFY] [.env](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/.env)
+- Append `REDIS_URL=redis://localhost:6379` and `REDIS_LOCK_TTL_MS=10000` if not already present.
 
 ---
 
-### Frontend (`client/`)
+### Redis Client & Distributed Lock Service
 
-#### [NEW] [context/NotificationContext.tsx](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/client/src/context/NotificationContext.tsx)
-* Create `NotificationContext` providing reusable notification state (`idle`, `submitting`, `success`, `error`, `duplicate`) and trigger helpers.
+#### [NEW] [redis.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/config/redis.ts)
+- Singleton Redis client wrapper using `createClient({ url: config.redisUrl })`.
+- Handles lifecycle events: `connect`, `ready`, `error`, `reconnecting`, `end`.
+- Exposes `getRedisClient()`, `connectRedis()`, `disconnectRedis()`, and `isRedisAvailable()`.
+- Prevents Express application crashes if Redis is temporarily offline.
 
-#### [NEW] [components/Notification.tsx](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/client/src/components/Notification.tsx)
-* Render floating/banner UI for:
-  - `duplicate`: Soft info banner ("This billing event has already been processed.").
-  - `success`: Success banner ("Ledger transaction created successfully.").
-  - `error`: Error banner ("Unable to process the transaction. Please try again.").
-* Ensures raw backend MongoDB stack traces (e.g., `E11000`) are never displayed to end users.
+#### [NEW] [redis-lock.service.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/services/redis-lock.service.ts)
+- `acquireLock(tenantId: string, eventId: string, ttlMs?: number)`:
+  - Generates unique ownership token (`crypto.randomUUID()`).
+  - Executes atomic `SET ledger:lock:{tenantId}:{eventId} {token} NX PX {ttl}`.
+  - Returns `{ acquired: boolean, token?: string }`.
+- `releaseLock(tenantId: string, eventId: string, token: string)`:
+  - Executes atomic Lua script to compare token before deleting:
+    ```lua
+    if redis.call("get", KEYS[1]) == ARGV[1] then
+      return redis.call("del", KEYS[1])
+    else
+      return 0
+    end
+    ```
+- Sanitized logging for lock lifecycle events (never logs passwords or tokens).
 
-#### [MODIFY] [services/ledger.service.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/client/src/services/ledger.service.ts)
-* Update `createLedgerEntry` return type to expose `{ duplicate: boolean, data: LedgerEntry }`.
+---
+
+### Ledger API & Controller Integration
+
+#### [MODIFY] [ledger.controller.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/controllers/ledger.controller.ts)
+- Wrap ledger entry creation with Redis distributed locking:
+  1. Check Redis availability / attempt lock acquisition.
+  2. If Redis is unavailable -> return `503 Service Unavailable` with `code: "REDIS_UNAVAILABLE"`.
+  3. If lock acquisition fails -> return `409 Conflict` with `code: "EVENT_PROCESSING"`.
+  4. In `try ... finally`, process event through `idempotencyService` and ensure `releaseLock` is called in `finally`.
+
+---
+
+### Frontend Concurrency State & Notification
+
+#### [MODIFY] [NotificationContext.tsx](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/client/src/context/NotificationContext.tsx)
+- Add `'contention'` notification type.
+- Add `showContention(message?: string)`.
+
+#### [MODIFY] [Notification.tsx](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/client/src/components/Notification.tsx)
+- Render styled amber notification banner for `'contention'`.
+
+#### [MODIFY] [LedgerPage.tsx](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/client/src/pages/LedgerPage.tsx)
+- Catch `409 Conflict` (`EVENT_PROCESSING`) and trigger `showContention("This transaction is currently being processed. Please try again shortly.")`.
+- Preserve Day 9 duplicate handling and disable submit button during submission.
+
+---
+
+### Test Suite
+
+#### [NEW] [redisLock.test.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/tests/redisLock.test.ts)
+- Spin up `RedisMemoryServer` for zero-dependency, hermetic test execution.
+- Validate:
+  1. Redis connection & lifecycle
+  2. Lock acquisition success
+  3. Lock contention failure (2nd request blocked)
+  4. Lock TTL expiration
+  5. Correct owner token release
+  6. Wrong owner token release rejection
+  7. Lock release in `finally` after success
+  8. Lock release in `finally` after exception
+  9. Redis unavailable handling (503 response)
+  10. 4 concurrent requests for same event (1 lock winner, 3 contention responses, 1 DB record)
+  11. 10 concurrent requests for same event (strictly 1 DB record)
+  12. Different events use independent lock keys (no global lock)
+  13. Same event across different tenants use independent lock keys (tenant isolation)
+  14. Day 9 idempotency regression validation
+
+#### [MODIFY] [index.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/tests/index.ts)
+- Add `redisLock.test.ts` to test files.
+- Fix Windows path space quoting bug (`"${filePath}"`).
 
 ---
 
 ## Verification Plan
 
-### Automated Testing
+### Automated Tests
 1. Run `npm test` in `server/`:
-   - `security.test.ts` (7 tests)
-   - `tenantConnectionManager.test.ts` (8 tests)
-   - `tenantGateway.test.ts` (10 tests)
-   - `isolation.test.ts` (11 tests)
-   - `week1Audit.test.ts` (16 tests)
-   - `ledger.test.ts` (12 tests)
-   - `idempotency.test.ts` (~8 tests)
-   - **Total**: 72+ passing automated tests with 0 failures.
+   - Runs all 8 test suites sequentially:
+     - `security.test.ts`
+     - `tenantConnectionManager.test.ts`
+     - `tenantGateway.test.ts`
+     - `isolation.test.ts`
+     - `week1Audit.test.ts`
+     - `ledger.test.ts`
+     - `idempotency.test.ts`
+     - `redisLock.test.ts`
+   - Expect 85+ total assertions passing with exit code 0.
 
 2. Run `npm run build` in `server/` (`tsc`).
 3. Run `npm run build` in `client/` (`tsc -b && vite build`).
-
-### Database Verification
-* Verify index creation on Mongoose tenant connection models.
-

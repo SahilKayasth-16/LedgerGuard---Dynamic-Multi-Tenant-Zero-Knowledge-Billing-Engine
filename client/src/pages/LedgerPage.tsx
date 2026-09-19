@@ -17,7 +17,7 @@ export const LedgerPage: React.FC = () => {
   const [testDescription, setTestDescription] = useState<string>('');
   const [submittingTx, setSubmittingTx] = useState<boolean>(false);
 
-  const { showSuccess, showDuplicate, showError, setSubmitting, clearNotification } = useNotification();
+  const { showSuccess, showDuplicate, showContention, showError, setSubmitting, clearNotification } = useNotification();
 
   const fetchLedgerData = async () => {
     setLoading(true);
@@ -74,9 +74,13 @@ export const LedgerPage: React.FC = () => {
 
       await fetchLedgerData();
     } catch (err: any) {
-      const errorMsg =
-        err.response?.data?.message || 'Unable to process the transaction. Please try again.';
-      showError(errorMsg);
+      if (err.response?.status === 409 || err.response?.data?.code === 'EVENT_PROCESSING') {
+        showContention(err.response?.data?.message || 'This transaction is currently being processed. Please try again shortly.');
+      } else {
+        const errorMsg =
+          err.response?.data?.message || 'Unable to process the transaction. Please try again.';
+        showError(errorMsg);
+      }
     } finally {
       setSubmittingTx(false);
     }

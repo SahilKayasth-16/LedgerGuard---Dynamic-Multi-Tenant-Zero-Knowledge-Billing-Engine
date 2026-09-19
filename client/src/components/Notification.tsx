@@ -34,6 +34,14 @@ export const Notification: React.FC = () => {
           icon: '⚠️',
           title: 'Error',
         };
+      case 'contention':
+        return {
+          backgroundColor: '#FFFBEB',
+          borderColor: '#FCD34D',
+          color: '#B45309',
+          icon: '🔒',
+          title: 'Processing in Progress',
+        };
       case 'submitting':
         return {
           backgroundColor: '#F8FAFC',

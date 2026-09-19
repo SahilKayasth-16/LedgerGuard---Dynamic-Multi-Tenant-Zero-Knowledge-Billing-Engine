@@ -8,7 +8,6 @@ const App: React.FC = () => {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <AppRoutes />
         <NotificationProvider>
           <AppRoutes />
         </NotificationProvider>

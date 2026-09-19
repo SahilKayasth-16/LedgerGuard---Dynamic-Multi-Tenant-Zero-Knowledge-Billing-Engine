@@ -15,4 +15,15 @@ export const config = {
     }
     return uri;
   },
+  get redisUrl(): string {
+    return process.env.REDIS_URL || 'redis://localhost:6379';
+  },
+  get redisLockTtlMs(): number {
+    const parsed = parseInt(process.env.REDIS_LOCK_TTL_MS || '10000', 10);
+    if (isNaN(parsed) || parsed <= 0) {
+      return 10000;
+    }
+    return parsed;
+  },
 };
+

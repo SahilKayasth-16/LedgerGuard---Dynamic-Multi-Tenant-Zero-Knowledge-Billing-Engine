@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
 
-export type NotificationType = 'idle' | 'submitting' | 'success' | 'error' | 'duplicate';
+export type NotificationType = 'idle' | 'submitting' | 'success' | 'error' | 'duplicate' | 'contention';
 
 export interface NotificationState {
   type: NotificationType;
@@ -13,6 +13,7 @@ export interface NotificationContextValue {
   notification: NotificationState;
   showSuccess: (message?: string) => void;
   showDuplicate: (message?: string) => void;
+  showContention: (message?: string) => void;
   showError: (message?: string) => void;
   setSubmitting: (message?: string) => void;
   clearNotification: () => void;
@@ -38,6 +39,17 @@ export const NotificationProvider: React.FC<{ children: ReactNode }> = ({ childr
     (message = 'This billing event has already been processed.') => {
       setNotification({
         type: 'duplicate',
+        message,
+        timestamp: Date.now(),
+      });
+    },
+    []
+  );
+
+  const showContention = useCallback(
+    (message = 'This transaction is currently being processed. Please try again shortly.') => {
+      setNotification({
+        type: 'contention',
         message,
         timestamp: Date.now(),
       });
@@ -77,6 +89,7 @@ export const NotificationProvider: React.FC<{ children: ReactNode }> = ({ childr
         notification,
         showSuccess,
         showDuplicate,
+        showContention,
         showError,
         setSubmitting,
         clearNotification,

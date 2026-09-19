@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { ledgerService } from '../services/ledger.service';
+import { redisLockService } from '../services/redis-lock.service';
 
 export const createLedgerEntry = async (req: Request, res: Response): Promise<void> => {
   if (!req.tenantDb || !req.user || !req.user.tenantId) {
@@ -84,9 +85,34 @@ export const createLedgerEntry = async (req: Request, res: Response): Promise<vo
     return;
   }
 
+  const trimmedEventId = eventId.trim();
+
+  // Attempt to acquire Redis distributed lock for concurrent event coordination
+  const lockResult = await redisLockService.acquireLock(authenticatedTenantId, trimmedEventId);
+
+  // If Redis is unavailable, fail safely with 503
+  if (lockResult.redisUnavailable) {
+    res.status(503).json({
+      success: false,
+      code: 'REDIS_UNAVAILABLE',
+      message: 'Ledger processing is temporarily unavailable.',
+    });
+    return;
+  }
+
+  // If lock is unavailable (another request currently processing this event), return 409 Conflict
+  if (!lockResult.acquired) {
+    res.status(409).json({
+      success: false,
+      code: 'EVENT_PROCESSING',
+      message: 'This billing event is currently being processed.',
+    });
+    return;
+  }
+
   try {
     const result = await ledgerService.createLedgerEntry(req.tenantDb, authenticatedTenantId, {
-      eventId: eventId.trim(),
+      eventId: trimmedEventId,
       type,
       amount,
       currency: currency.trim().toUpperCase(),
@@ -123,6 +149,11 @@ export const createLedgerEntry = async (req: Request, res: Response): Promise<vo
       success: false,
       message: error.message || 'Failed to create ledger entry.',
     });
+  } finally {
+    // Lock MUST be released in finally block
+    if (lockResult.token) {
+      await redisLockService.releaseLock(authenticatedTenantId, trimmedEventId, lockResult.token);
+    }
   }
 };
 

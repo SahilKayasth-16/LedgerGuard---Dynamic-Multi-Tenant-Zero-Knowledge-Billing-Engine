@@ -2,6 +2,7 @@ import http from 'http';
 import app from '../app';
 import { generateAccessToken } from '../utils/jwt';
 import { tenantConnectionManager } from '../services/tenantConnectionManager';
+import { disconnectRedis } from '../config/redis';
 
 const request = (
   server: http.Server,
@@ -324,6 +325,7 @@ async function runLedgerTests() {
     console.log('================================================================\n');
   } finally {
     await tenantConnectionManager.disconnectAll();
+    await disconnectRedis();
     server.close();
   }
 
