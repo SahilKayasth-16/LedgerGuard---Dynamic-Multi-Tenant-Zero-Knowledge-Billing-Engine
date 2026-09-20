@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { getLedgerModel, ILedgerEntry, LedgerEntryType } from '../models/ledger.model';
+import { getLedgerAuditModel, ILedgerAuditLog } from '../models/ledgerAudit.model';
 import { idempotencyService, IdempotencyResult } from './idempotency.service';
 
 export interface CreateLedgerDTO {
@@ -50,6 +51,17 @@ export class LedgerService {
     }
 
     return await LedgerModel.findOne({ _id: id, tenantId }).select('-__v');
+  }
+
+  /**
+   * Retrieves all ledger audit logs belonging strictly to the authenticated tenant.
+   */
+  public async getLedgerAuditLogs(
+    tenantDb: mongoose.Connection,
+    tenantId: string
+  ): Promise<ILedgerAuditLog[]> {
+    const AuditModel = getLedgerAuditModel(tenantDb);
+    return await AuditModel.find({ tenantId }).sort({ createdAt: -1 }).select('-__v');
   }
 }
 

@@ -129,6 +129,7 @@ export const createLedgerEntry = async (req: Request, res: Response): Promise<vo
     res.status(statusCode).json({
       success: true,
       duplicate: result.duplicate,
+      transactionCommitted: true,
       message,
       data: {
         id: entry._id,
@@ -248,6 +249,44 @@ export const getLedgerEntryById = async (req: Request, res: Response): Promise<v
     res.status(500).json({
       success: false,
       message: 'Failed to retrieve ledger entry.',
+    });
+  }
+};
+
+export const getLedgerAuditLogs = async (req: Request, res: Response): Promise<void> => {
+  if (!req.tenantDb || !req.user || !req.user.tenantId) {
+    res.status(500).json({
+      success: false,
+      message: 'Authenticated tenant database connection unavailable.',
+    });
+    return;
+  }
+
+  try {
+    const authenticatedTenantId = req.user.tenantId;
+    const auditLogs = await ledgerService.getLedgerAuditLogs(req.tenantDb, authenticatedTenantId);
+
+    const formattedData = auditLogs.map((log) => ({
+      id: log._id,
+      tenantId: log.tenantId,
+      eventId: log.eventId,
+      ledgerEntryId: log.ledgerEntryId,
+      action: log.action,
+      status: log.status,
+      details: log.details,
+      createdAt: log.createdAt,
+      updatedAt: log.updatedAt,
+    }));
+
+    res.status(200).json({
+      success: true,
+      tenantId: authenticatedTenantId,
+      data: formattedData,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve ledger audit logs.',
     });
   }
 };

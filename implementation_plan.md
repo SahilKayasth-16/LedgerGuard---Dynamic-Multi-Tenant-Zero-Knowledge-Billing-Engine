@@ -1,12 +1,14 @@
-# Implementation Plan — Day 10: Redis Distributed Locks
+# Implementation Plan — Day 11: MongoDB Multi-Document Transactions + ACID Ledger Processing
 
-Day 10 introduces **Redis distributed locking** to coordinate concurrent processing of billing events across LedgerGuard's multi-tenant architecture.
+Day 11 introduces **MongoDB ACID transaction handling** into LedgerGuard using tenant-isolated sessions and multi-document atomicity.
 
 ---
 
-## Technical Goal & Concurrency Flow
+## Technical Goal & Concurrency/Transaction Flow
 
-The Redis lock coordinates concurrent requests for the **same tenant + event ID**, preventing race conditions before the event reaches the database:
+Redis distributed locks (Day 10) coordinate **concurrency**, while MongoDB multi-document transactions (Day 11) guarantee **ACID database atomicity**.
+
+> **Core Invariant**: A billing operation must never leave the tenant database in a partially updated state. Either the `LedgerEntry` and its corresponding `LedgerAuditLog` are atomically committed together, or the session aborts and neither document persists.
 
 ```text
 POST /api/ledger
@@ -15,145 +17,123 @@ JWT Authentication (Verified req.user.tenantId)
         ↓
 Tenant Connection Manager (Tenant Database)
         ↓
-tenantId + eventId
+Acquire Redis Distributed Lock (ledger:lock:{tenantId}:{eventId})
         ↓
-Acquire Redis Lock (SET ledger:lock:{tenantId}:{eventId} {uniqueToken} NX PX {ttl})
+Idempotency Check
         ↓
-┌──────────────────────────────┐
-│ Lock Acquired?               │
-└──────────────┬───────────────┘
-               │
-        ┌──────┴──────┐
-        │             │
-       YES            NO (Another request processing)
-        │             │
-        ↓             ↓
-Existing Event?   Return 409 Conflict
-        │         { code: "EVENT_PROCESSING",
-   ┌────┴────┐      message: "This billing event is currently being processed." }
-   │         │
-  YES        NO
-   │         │
-   ↓         ↓
-Return     Insert
-Existing   Ledger Entry
-   │         │
-   └────┬────┘
+Start Tenant MongoDB Session (const session = await tenantDb.startSession())
         ↓
-   finally: Atomic Release Lock (Lua compare-and-delete)
+Start MongoDB Transaction (session.startTransaction())
         ↓
-     Response (201 Created or 200 OK)
+┌───────────────────────────────────────────────────────────┐
+│ Multi-Document Transactional Writes                       │
+│ 1. Create LedgerEntry (status: 'completed', session)      │
+│ 2. Create LedgerAuditLog (action: 'CREATED', session)    │
+└─────────────────────────────┬─────────────────────────────┘
+                              │
+                    ┌─────────┴─────────┐
+                    │  Writes Valid?    │
+                    └─────────┬─────────┘
+                              │
+                       ┌──────┴──────┐
+                      YES           NO / Exception
+                       │             │
+                       ↓             ↓
+               Commit Transaction   Abort Transaction
+             (commitTransaction)   (abortTransaction)
+                       │             │
+                       └──────┬──────┘
+                              ↓
+                  finally: endSession()
+                              ↓
+               finally: release Redis Lock
+                              ↓
+              Response (201 Created / 400 Bad Request)
 ```
-
-If Redis is temporarily unavailable, fail safely with `503 Service Unavailable` (`"Ledger processing is temporarily unavailable."`) without exposing raw Redis errors or bypassing locking.
 
 ---
 
 ## User Review Required
 
 > [!IMPORTANT]
-> **Separation of Concerns: Redis Locking vs Idempotency Guarantee**:
-> - **Redis Distributed Lock**: Concurrency coordination mechanism answering *"Who can process this event right now?"*
-> - **MongoDB Compound Unique Index (`{ tenantId: 1, eventId: 1 }`)**: Day 9 idempotency guarantee answering *"Can this event exist more than once?"*
-> - **Strict Boundaries Preserved**: MongoDB multi-document transactions and sessions belong to **Day 11**. Distributed queues/workers and payment processing remain strictly out of scope for Day 10.
+> **Tenant Connection Session Requirement & Redis Isolation Boundary**:
+> - **Tenant Connection Sessions**: Sessions MUST be spawned from `tenantDb.startSession()`, NOT the global `mongoose.startSession()`. This ensures transactions run strictly on the tenant-isolated MongoDB instance.
+> - **Multi-Document Persistence**: A transaction creates BOTH a `LedgerEntry` AND a `LedgerAuditLog` document atomically. If an exception occurs (or validation fails), `abortTransaction()` rolls back both documents completely.
+> - **Lock & Session Lifecycles**: Redis locks are acquired BEFORE transaction start and released in `finally` AFTER session cleanup (`endSession()`).
+
+---
+
+## Open Questions
+
+- None. Requirements for session management, multi-document atomicity, audit logging, transaction rollbacks, test suites, and documentation are fully specified.
 
 ---
 
 ## Proposed Changes
 
-### Configuration Layer
+### Ledger Models
 
-#### [MODIFY] [env.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/config/env.ts)
-- Add `redisUrl`: reads `process.env.REDIS_URL || 'redis://localhost:6379'`.
-- Add `redisLockTtlMs`: reads `process.env.REDIS_LOCK_TTL_MS || '10000'`, validating it is a finite number > 0.
-
-#### [MODIFY] [.env.example](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/.env.example)
-- Add safe placeholder:
-  ```env
-  REDIS_URL=redis://localhost:6379
-  REDIS_LOCK_TTL_MS=10000
-  ```
-
-#### [MODIFY] [.env](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/.env)
-- Append `REDIS_URL=redis://localhost:6379` and `REDIS_LOCK_TTL_MS=10000` if not already present.
+#### [NEW] [ledgerAudit.model.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/models/ledgerAudit.model.ts)
+- Define `ILedgerAuditLog` interface and `LedgerAuditSchema`:
+  - `tenantId`: string (required)
+  - `eventId`: string (required)
+  - `ledgerEntryId`: Mongoose ObjectId (required)
+  - `action`: `'LEDGER_ENTRY_CREATED' | 'LEDGER_ENTRY_DUPLICATE_ATTEMPT'`
+  - `status`: `'completed' | 'failed' | 'duplicate'`
+  - `details`: Schema.Types.Mixed
+  - `timestamp`: Date (default: `Date.now`)
+- Expose `getLedgerAuditModel(conn: mongoose.Connection)`.
 
 ---
 
-### Redis Client & Distributed Lock Service
+### Transaction & Idempotency Services
 
-#### [NEW] [redis.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/config/redis.ts)
-- Singleton Redis client wrapper using `createClient({ url: config.redisUrl })`.
-- Handles lifecycle events: `connect`, `ready`, `error`, `reconnecting`, `end`.
-- Exposes `getRedisClient()`, `connectRedis()`, `disconnectRedis()`, and `isRedisAvailable()`.
-- Prevents Express application crashes if Redis is temporarily offline.
+#### [NEW] [transaction.service.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/services/transaction.service.ts)
+- `executeTransaction<T>(tenantDb: mongoose.Connection, work: (session: mongoose.ClientSession) => Promise<T>): Promise<T>`
+- Starts session via `tenantDb.startSession()`.
+- Starts transaction via `session.startTransaction()`.
+- Executes transactional work callback with `{ session }`.
+- Commits transaction via `session.commitTransaction()`.
+- Catches errors and calls `session.abortTransaction()`.
+- Guarantees `session.endSession()` in `finally`.
 
-#### [NEW] [redis-lock.service.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/services/redis-lock.service.ts)
-- `acquireLock(tenantId: string, eventId: string, ttlMs?: number)`:
-  - Generates unique ownership token (`crypto.randomUUID()`).
-  - Executes atomic `SET ledger:lock:{tenantId}:{eventId} {token} NX PX {ttl}`.
-  - Returns `{ acquired: boolean, token?: string }`.
-- `releaseLock(tenantId: string, eventId: string, token: string)`:
-  - Executes atomic Lua script to compare token before deleting:
-    ```lua
-    if redis.call("get", KEYS[1]) == ARGV[1] then
-      return redis.call("del", KEYS[1])
-    else
-      return 0
-    end
-    ```
-- Sanitized logging for lock lifecycle events (never logs passwords or tokens).
+#### [MODIFY] [idempotency.service.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/services/idempotency.service.ts)
+- Update `processIdempotentLedgerEntry` to use `TransactionService` to create `LedgerEntry` and `LedgerAuditLog` atomically within a single MongoDB session.
+- Handle duplicate event checks gracefully and record audit logs.
 
----
-
-### Ledger API & Controller Integration
+#### [MODIFY] [ledger.service.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/services/ledger.service.ts)
+- Pass transaction context down to `idempotencyService`.
+- Expose audit log retrieval method `getLedgerAuditLogs(tenantDb, tenantId)`.
 
 #### [MODIFY] [ledger.controller.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/controllers/ledger.controller.ts)
-- Wrap ledger entry creation with Redis distributed locking:
-  1. Check Redis availability / attempt lock acquisition.
-  2. If Redis is unavailable -> return `503 Service Unavailable` with `code: "REDIS_UNAVAILABLE"`.
-  3. If lock acquisition fails -> return `409 Conflict` with `code: "EVENT_PROCESSING"`.
-  4. In `try ... finally`, process event through `idempotencyService` and ensure `releaseLock` is called in `finally`.
+- Coordinate request validation, Redis lock acquisition, transactional ledger creation, response formatting, and lock release in `finally`.
 
 ---
 
-### Frontend Concurrency State & Notification
+### Documentation & Architecture Guide
 
-#### [MODIFY] [NotificationContext.tsx](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/client/src/context/NotificationContext.tsx)
-- Add `'contention'` notification type.
-- Add `showContention(message?: string)`.
-
-#### [MODIFY] [Notification.tsx](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/client/src/components/Notification.tsx)
-- Render styled amber notification banner for `'contention'`.
-
-#### [MODIFY] [LedgerPage.tsx](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/client/src/pages/LedgerPage.tsx)
-- Catch `409 Conflict` (`EVENT_PROCESSING`) and trigger `showContention("This transaction is currently being processed. Please try again shortly.")`.
-- Preserve Day 9 duplicate handling and disable submit button during submission.
+#### [NEW] [ledger-transactions.md](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/docs/ledger-transactions.md)
+- Comprehensive architectural guide covering:
+  1. MongoDB Session & Transaction Architecture in LedgerGuard
+  2. Multi-tenant isolation for sessions (`tenantDb.startSession()`)
+  3. Multi-document atomicity (`LedgerEntry` + `LedgerAuditLog`)
+  4. Failure & Rollback mechanics (`abortTransaction()`)
+  5. Distinction between Redis Distributed Locks (Concurrency) vs MongoDB Transactions (Database ACID)
 
 ---
 
 ### Test Suite
 
-#### [NEW] [redisLock.test.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/tests/redisLock.test.ts)
-- Spin up `RedisMemoryServer` for zero-dependency, hermetic test execution.
-- Validate:
-  1. Redis connection & lifecycle
-  2. Lock acquisition success
-  3. Lock contention failure (2nd request blocked)
-  4. Lock TTL expiration
-  5. Correct owner token release
-  6. Wrong owner token release rejection
-  7. Lock release in `finally` after success
-  8. Lock release in `finally` after exception
-  9. Redis unavailable handling (503 response)
-  10. 4 concurrent requests for same event (1 lock winner, 3 contention responses, 1 DB record)
-  11. 10 concurrent requests for same event (strictly 1 DB record)
-  12. Different events use independent lock keys (no global lock)
-  13. Same event across different tenants use independent lock keys (tenant isolation)
-  14. Day 9 idempotency regression validation
+#### [NEW] [transaction.test.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/tests/transaction.test.ts)
+- End-to-end integration and transaction test suite:
+  1. Multi-document atomic commit (`LedgerEntry` + `LedgerAuditLog` both created in single transaction)
+  2. Forced rollback on error (neither `LedgerEntry` nor `LedgerAuditLog` persisted when error occurs)
+  3. Session cleanup verification (`session.endSession()` called in `finally`)
+  4. Tenant connection session isolation (`tenantDb.startSession()`)
+  5. Day 9 idempotency & Day 10 Redis lock regression validation
 
 #### [MODIFY] [index.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/tests/index.ts)
-- Add `redisLock.test.ts` to test files.
-- Fix Windows path space quoting bug (`"${filePath}"`).
+- Include `transaction.test.ts` in the test runner.
 
 ---
 
@@ -161,16 +141,8 @@ If Redis is temporarily unavailable, fail safely with `503 Service Unavailable` 
 
 ### Automated Tests
 1. Run `npm test` in `server/`:
-   - Runs all 8 test suites sequentially:
-     - `security.test.ts`
-     - `tenantConnectionManager.test.ts`
-     - `tenantGateway.test.ts`
-     - `isolation.test.ts`
-     - `week1Audit.test.ts`
-     - `ledger.test.ts`
-     - `idempotency.test.ts`
-     - `redisLock.test.ts`
-   - Expect 85+ total assertions passing with exit code 0.
+   - Executes all 9 test suites sequentially including `transaction.test.ts`.
+   - Expect all assertions to pass with 0 errors.
 
 2. Run `npm run build` in `server/` (`tsc`).
 3. Run `npm run build` in `client/` (`tsc -b && vite build`).

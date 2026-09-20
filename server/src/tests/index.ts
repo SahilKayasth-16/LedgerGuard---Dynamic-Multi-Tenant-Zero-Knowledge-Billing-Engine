@@ -10,6 +10,7 @@ const testFiles = [
   'ledger.test.ts',
   'idempotency.test.ts',
   'redisLock.test.ts',
+  'transaction.test.ts',
 ];
 
 console.log(`\n>>> EXECUTING ALL ${testFiles.length} TEST SUITES FOR LEDGERGUARD <<<\n`);
@@ -32,6 +33,5 @@ for (const file of testFiles) {
 }
 
 console.log('\n================================================================');
-console.log('🎉 ALL TEST SUITES PASSED SUCCESSFULLY! (87+ ASSERTIONS)');
+console.log('🎉 ALL TEST SUITES PASSED SUCCESSFULLY!');
 console.log('================================================================\n');
-
