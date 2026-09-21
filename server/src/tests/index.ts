@@ -11,6 +11,7 @@ const testFiles = [
   'idempotency.test.ts',
   'redisLock.test.ts',
   'transaction.test.ts',
+  'day12Integration.test.ts',
 ];
 
 console.log(`\n>>> EXECUTING ALL ${testFiles.length} TEST SUITES FOR LEDGERGUARD <<<\n`);

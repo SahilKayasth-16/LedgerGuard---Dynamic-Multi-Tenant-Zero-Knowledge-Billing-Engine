@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { ledgerService } from '../services/ledger.service';
-import { redisLockService } from '../services/redis-lock.service';
+import { ledgerProcessingService } from '../services/ledger-processing.service';
 
 export const createLedgerEntry = async (req: Request, res: Response): Promise<void> => {
   if (!req.tenantDb || !req.user || !req.user.tenantId) {
@@ -85,77 +85,68 @@ export const createLedgerEntry = async (req: Request, res: Response): Promise<vo
     return;
   }
 
-  const trimmedEventId = eventId.trim();
-
-  // Attempt to acquire Redis distributed lock for concurrent event coordination
-  const lockResult = await redisLockService.acquireLock(authenticatedTenantId, trimmedEventId);
-
-  // If Redis is unavailable, fail safely with 503
-  if (lockResult.redisUnavailable) {
-    res.status(503).json({
-      success: false,
-      code: 'REDIS_UNAVAILABLE',
-      message: 'Ledger processing is temporarily unavailable.',
-    });
-    return;
-  }
-
-  // If lock is unavailable (another request currently processing this event), return 409 Conflict
-  if (!lockResult.acquired) {
-    res.status(409).json({
-      success: false,
-      code: 'EVENT_PROCESSING',
-      message: 'This billing event is currently being processed.',
-    });
-    return;
-  }
-
-  try {
-    const result = await ledgerService.createLedgerEntry(req.tenantDb, authenticatedTenantId, {
-      eventId: trimmedEventId,
+  // Process event through unified ledger orchestrator
+  const result = await ledgerProcessingService.processLedgerEvent(
+    req.tenantDb,
+    authenticatedTenantId,
+    {
+      eventId: eventId.trim(),
       type,
       amount,
       currency: currency.trim().toUpperCase(),
       description: description ? description.trim() : undefined,
       metadata,
-    });
+    }
+  );
 
-    const entry = result.entry;
-    const statusCode = result.duplicate ? 200 : 201;
-    const message = result.duplicate
-      ? 'Ledger event has already been processed.'
-      : 'Ledger entry created successfully.';
-
-    res.status(statusCode).json({
-      success: true,
-      duplicate: result.duplicate,
-      transactionCommitted: true,
-      message,
-      data: {
-        id: entry._id,
-        eventId: entry.eventId,
-        tenantId: entry.tenantId,
-        type: entry.type,
-        amount: entry.amount,
-        currency: entry.currency,
-        description: entry.description,
-        status: entry.status,
-        metadata: entry.metadata,
-        createdAt: entry.createdAt,
-        updatedAt: entry.updatedAt,
-      },
+  if (result.status === 'REDIS_UNAVAILABLE') {
+    res.status(503).json({
+      success: false,
+      code: 'REDIS_UNAVAILABLE',
+      message: result.message,
     });
-  } catch (error: any) {
+    return;
+  }
+
+  if (result.status === 'EVENT_PROCESSING') {
+    res.status(409).json({
+      success: false,
+      code: 'EVENT_PROCESSING',
+      message: result.message,
+    });
+    return;
+  }
+
+  if (result.status === 'FAILED' || !result.entry) {
     res.status(400).json({
       success: false,
-      message: error.message || 'Failed to create ledger entry.',
+      message: result.message,
     });
-  } finally {
-    // Lock MUST be released in finally block
-    if (lockResult.token) {
-      await redisLockService.releaseLock(authenticatedTenantId, trimmedEventId, lockResult.token);
-    }
+    return;
   }
+
+  const entry = result.entry;
+  const statusCode = result.duplicate ? 200 : 201;
+
+  res.status(statusCode).json({
+    success: true,
+    duplicate: result.duplicate,
+    transactionCommitted: true,
+    message: result.message,
+    data: {
+      id: entry._id,
+      eventId: entry.eventId,
+      tenantId: entry.tenantId,
+      type: entry.type,
+      amount: entry.amount,
+      currency: entry.currency,
+      description: entry.description,
+      status: entry.status,
+      metadata: entry.metadata,
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
+    },
+  });
 };
 
 export const getLedgerEntries = async (req: Request, res: Response): Promise<void> => {
