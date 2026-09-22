@@ -1,151 +1,99 @@
-# Implementation Plan — Day 12: Idempotency + Redis + MongoDB Integration
+# Implementation Plan — Day 13: Billing Ledger UI + Transaction History
 
-Day 12 is the **core integration milestone of Week 2**, combining Day 9 (Tenant-Aware Idempotency & Database Unique Constraints), Day 10 (Redis Distributed Locking), and Day 11 (MongoDB Multi-Document ACID Transactions) into a unified, resilient billing processing pipeline.
+Day 13 transforms `/dashboard/ledger` into a **fully functional, production-ready Billing Ledger & Transaction History interface** backed exclusively by real backend API data (`GET /api/ledger` and `POST /api/ledger`).
 
 ---
 
-## Technical Architecture & Invariant
+## Core Principles & Invariants
 
-> **Core Invariant**: One legitimate `tenantId + eventId` must result in **strictly one committed ledger operation**, even when the same billing event is submitted concurrently or repeatedly.
-
-### Unified Request Processing Pipeline
+> **Core Invariant**: The Billing Ledger UI is a direct representation of the backend's tenant-isolated ledger state. No mock data, hardcoded rows, or fabricated transactions exist in the production interface.
 
 ```text
-                         POST /api/ledger
-                                │
-                                ▼
-                       JWT Authentication (RS256)
-                                │
-                                ▼
-                        Tenant Resolution
-                                │
-                                ▼
-                    Tenant DB Connection Manager
-                                │
-                                ▼
-                         Validate Request Body
-                                │
-                                ▼
-                       Acquire Redis Lock (ledger:lock:{tenantId}:{eventId})
-                                │
-                                ▼
-                     Existing Event Check (Idempotency)
-                                │
-                       ┌────────┴────────┐
-                       │                 │
-                    Exists            New Event
-                       │                 │
-                       ▼                 ▼
-                   Duplicate       Start Tenant Mongo Session (startSession)
-                   Response              │
-                  (200 OK)               ▼
-                                   Start Transaction (startTransaction)
-                                         │
-                                         ▼
-                                  Write Ledger & Audit Documents
-                                         │
-                                         ▼
-                                      COMMIT (commitTransaction)
-                                         │
-                                         ▼
-                                  finally: endSession()
-                                         │
-                                         ▼
-                                  finally: release Redis Lock
-                                         │
-                                         ▼
-                                    API Response (201 Created)
+Authenticated User (JWT)
+       ↓
+/dashboard/ledger
+       ↓
+GET /api/ledger
+       ↓
+Tenant Resolution & Connection Manager
+       ↓
+Tenant-isolated Database
+       ↓
+Formatted Transaction Table (Intl Amount & Date Formatting)
 ```
-
----
-
-## Component Responsibilities & Boundaries
-
-1. **JWT Auth & Tenant Resolution**: Authenticates identity via RS256 JWT; derives authoritative `req.user.tenantId`. User body cannot override tenant identity.
-2. **TenantConnectionManager**: Resolves and caches tenant-isolated MongoDB connection (`tenantDb`). Connection reuse prevents pool exhaustion.
-3. **Redis Lock Service**: Coordinates concurrent requests before database entry. Key: `ledger:lock:{tenantId}:{eventId}` with random UUID token, finite TTL, and atomic Lua script release.
-4. **Idempotency Service**: Performs application-level lookup (`findOne({ tenantId, eventId })`) and handles compound unique index fallback (`{ tenantId: 1, eventId: 1 }`).
-5. **Transaction Service**: Manages multi-document ACID atomicity on `tenantDb`. Creates both `LedgerEntry` and `LedgerAuditLog` atomically. Aborts on failure and ends session in `finally`.
 
 ---
 
 ## User Review Required
 
 > [!IMPORTANT]
-> **Strict Concurrency & Failure Isolation Requirements**:
-> - **Redis Lock Order**: Lock acquisition MUST precede idempotency lookup and transaction execution.
-> - **Lock Key Isolation**: Lock keys incorporate `tenantId` prefix (`ledger:lock:{tenantId}:{eventId}`) so `tenantA + event-001` and `tenantB + event-001` never block each other.
-> - **Redis Unavailable Handling**: If Redis is unavailable, return `503 Service Unavailable` (`REDIS_UNAVAILABLE`). Lock is NEVER silently bypassed.
-> - **Lock Contention Handling**: Concurrent duplicate requests return `409 Conflict` (`EVENT_PROCESSING`) while lock is held, or `200 OK` (`duplicate: true`) after winner completes.
-> - **Cleanup Guarantees**: Session cleanup (`endSession()`) and Redis lock release (`releaseLock()`) MUST occur in `finally` blocks under all success and error paths.
+> **UI Design & Formatting Enhancements**:
+> - **Idempotency Key Guidance**: The creation form clearly designates `Event ID (Idempotency Key)` with explicit help text explaining deduplication behavior.
+> - **Intl Amount & Date Formatting**: Amounts format dynamically using `Intl.NumberFormat` by record currency (e.g. `INR` -> `₹500.00`, `USD` -> `$500.00`, `EUR` -> `€500.00`). Timestamps format using `Intl.DateTimeFormat` (e.g. `21 Sep 2026, 4:00 PM`).
+> - **Status Indicators**: Status badges render accessible text labels (`Completed`, `Pending`, `Failed`, `Processing`) with semantic styling.
+> - **Retry Action**: Error state includes an interactive `[Retry Loading Records]` button to recover gracefully from network glitches.
+> - **Transaction Details View**: Table rows support clicking to inspect detailed event metadata (Event ID, Type, Amount, Currency, Status, Description, Date, Metadata).
+> - **Backend Error Sanitization**: All API error responses return sanitized error codes (`VALIDATION_ERROR`, `EVENT_PROCESSING`, `REDIS_UNAVAILABLE`, `SERVER_ERROR`) without leaking internal stack traces or connection strings.
 
 ---
 
 ## Open Questions
 
-- None. Architecture, test requirements, response contracts, and frontend state alignment are fully specified.
+- None. UI requirements, formatting policies, error handling, documentation, and test criteria are fully specified.
 
 ---
 
 ## Proposed Changes
 
-### Backend Processing & Services
-
-#### [NEW] [ledger-processing.service.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/services/ledger-processing.service.ts)
-- Create unified orchestrator service `LedgerProcessingService` that encapsulates:
-  1. Redis lock acquisition via `redisLockService`
-  2. Idempotency check via `idempotencyService`
-  3. MongoDB multi-document ACID transaction execution via `transactionService`
-  4. Automatic session end and lock release in `finally` blocks
-  5. Detailed server-side logging for audit and debugging
-
-#### [MODIFY] [ledger.controller.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/controllers/ledger.controller.ts)
-- Update `createLedgerEntry` controller to invoke `ledgerProcessingService.processLedgerEvent()`.
-- Ensure clean HTTP response mapping for `201 Created`, `200 OK (duplicate)`, `409 Conflict (contention)`, `503 Service Unavailable (redis down)`, and `400 Bad Request`.
-
----
-
-### Documentation & Architectural Guide
-
-#### [NEW] [ledger-processing-flow.md](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/docs/ledger-processing-flow.md)
-- Complete technical reference documenting:
-  - Sequence diagram of the end-to-end processing pipeline
-  - Layer-by-layer responsibility analysis (Auth, Connection Manager, Redis Lock, Idempotency, Mongo Transaction, Unique Index)
-  - Failure matrix (Redis failure, DB failure, transaction abort, lock TTL expiry)
-  - Concurrency guarantees and cross-tenant security invariants
-
----
-
-### Integration & Regression Test Suite
-
-#### [NEW] [day12Integration.test.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/tests/day12Integration.test.ts)
-- Comprehensive Day 12 integration test suite covering the full 14-point test matrix:
-  1. First event submission (201 Created, duplicate: false, 1 DB record)
-  2. Sequential duplicate submission (200 OK, duplicate: true, 1 DB record)
-  3. 10 concurrent duplicate requests (1 lock winner, 9 duplicate/contention responses, strictly 1 DB record)
-  4. 50 concurrent duplicate requests (strictly 1 DB record, zero race condition errors)
-  5. Different event IDs (independent locks, independent 201 entries)
-  6. Same event ID across tenants (`tenantA` vs `tenantB` independent execution)
-  7. Tenant override attempt (`req.body.tenantId` injection ignored; verified JWT `req.user.tenantId` enforced)
-  8. Redis unavailable handling (controlled 503 response, lock not bypassed)
-  9. Transaction failure / rollback (atomic abort, zero partial state)
-  10. MongoDB failure resiliency (controlled 500, lock released in `finally`, server survives)
-  11. Redis TTL & orphan lock recovery
-  12. Safe lock release verification (Lua token matching)
-  13. Compound unique index fallback (`{ tenantId: 1, eventId: 1 }` E11000 handling)
-  14. Final ledger count verification
-
-#### [MODIFY] [index.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/tests/index.ts)
-- Add `day12Integration.test.ts` to the automated test suite runner.
-
----
-
-### Frontend Real Data & State Alignment
+### Frontend Component & Service Updates
 
 #### [MODIFY] [LedgerPage.tsx](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/client/src/pages/LedgerPage.tsx)
-- Ensure form submission directly queries `POST /api/ledger` and updates table from `GET /api/ledger`.
-- Handle transaction status states (`pending` -> `processing` -> `completed` / `duplicate` / `contention` / `failed`).
-- Display status badges cleanly for `completed`, `pending`, and `failed`.
+- Enhance `/dashboard/ledger` with:
+  1. Amount formatting utility (`formatCurrencyAmount(amount, currency)`) using `Intl.NumberFormat`.
+  2. Date formatting utility (`formatDateTime(dateString)`) displaying readable local timestamps (`21 Sep 2026, 4:00 PM`).
+  3. Form field guidance for `Event ID (Idempotency Key)` explaining deduplication behavior.
+  4. Interactive `[Retry Loading Records]` button on API error state.
+  5. Detailed transaction inspection modal/drawer when clicking a ledger row.
+  6. Client-side validation for non-empty Event ID, positive amount > 0, and valid currency code.
+  7. Clear duplicate notification (`"This event has already been processed. No duplicate transaction was created."`).
+
+#### [MODIFY] [ledger.service.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/client/src/services/ledger.service.ts)
+- Update TypeScript interfaces if needed to include `transactionCommitted` or details fields.
+
+---
+
+### Backend Controller & Error Sanitization
+
+#### [MODIFY] [ledger.controller.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/controllers/ledger.controller.ts)
+- Audit error handlers to ensure all catch blocks return safe, sanitized JSON error responses without stack traces or internal filesystem paths.
+
+---
+
+### Documentation & Architectural Reference
+
+#### [NEW] [ledger-ui.md](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/docs/ledger-ui.md)
+- Complete technical documentation detailing:
+  1. Ledger Page UI architecture & data flow
+  2. Backend API endpoints used (`GET /api/ledger`, `POST /api/ledger`, `GET /api/ledger/:id`, `GET /api/ledger/audit-logs`)
+  3. Idempotency Key explanation & user guidance
+  4. Formatting standards (`Intl.NumberFormat`, `Intl.DateTimeFormat`)
+  5. Loading, Empty, Error, and Duplicate notification states
+  6. Multi-tenant isolation verification and backend error sanitization policies
+
+---
+
+### Test Suite & Integration Tests
+
+#### [NEW] [day13LedgerUi.test.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/tests/day13LedgerUi.test.ts)
+- Add Day 13 frontend/backend integration test suite verifying:
+  1. `GET /api/ledger` returns real tenant-isolated database records
+  2. `POST /api/ledger` handles idempotency and returns duplicate flag correctly
+  3. Error responses contain sanitized error messages without internal stack traces
+  4. Tenant A and Tenant B data isolation remains 100% segregated
+  5. Audit logs endpoint functions correctly
+
+#### [MODIFY] [index.ts](file:///C:/Users/sahil/Desktop/Internship%20sem%208/Infotact%20Solutions/LedgerGuard/server/src/tests/index.ts)
+- Add `day13LedgerUi.test.ts` to the test runner index.
 
 ---
 
@@ -153,11 +101,11 @@ Day 12 is the **core integration milestone of Week 2**, combining Day 9 (Tenant-
 
 ### Automated Tests
 1. Run `npm test` in `server/`:
-   - Executes all 10 test suites sequentially including `day12Integration.test.ts`.
-   - Expect 100+ total assertions passing with 0 errors.
+   - Executes all 11 test suites sequentially including `day13LedgerUi.test.ts`.
+   - Expect 130+ total assertions passing with 0 errors.
 
 2. Run `npm run build` in `server/` (`tsc`).
 3. Run `npm run build` in `client/` (`tsc -b && vite build`).
 
-### Manual Verification Matrix Report
-Output the complete Day 12 Integration Validation Report with exact concurrency test counts as specified in the prompt guidelines.
+### Manual Verification Matrix
+Output the Day 13 Validation Report with actual test results across all 35 manual flow checks specified in the prompt.
