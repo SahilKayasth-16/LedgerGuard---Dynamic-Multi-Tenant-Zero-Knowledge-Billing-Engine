@@ -86,6 +86,8 @@ const LedgerSchema: Schema = new Schema(
 
 // Compound unique index enforcing tenant-aware idempotency on eventId
 LedgerSchema.index({ tenantId: 1, eventId: 1 }, { unique: true });
+// Compound index optimizing tenant-aware analytics date-range queries
+LedgerSchema.index({ tenantId: 1, createdAt: 1 });
 
 export const getLedgerModel = (conn: mongoose.Connection): Model<ILedgerEntry> => {
   if (conn.models.LedgerEntry) {

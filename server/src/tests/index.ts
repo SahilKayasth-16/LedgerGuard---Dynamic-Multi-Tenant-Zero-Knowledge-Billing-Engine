@@ -13,6 +13,12 @@ const testFiles = [
   'transaction.test.ts',
   'day12Integration.test.ts',
   'day13LedgerUi.test.ts',
+  'day14StressAudit.test.ts',
+  'day16Analytics.test.ts',
+  'day17Timeseries.test.ts',
+  'day18BreakdownLimits.test.ts',
+  'day19Dashboard.test.ts',
+  'day20AnalyticsAudit.test.ts',
 ];
 
 console.log(`\n>>> EXECUTING ALL ${testFiles.length} TEST SUITES FOR LEDGERGUARD <<<\n`);
