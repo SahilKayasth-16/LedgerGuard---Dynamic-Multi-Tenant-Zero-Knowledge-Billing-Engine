@@ -12,6 +12,7 @@ export const getTenantMe = (req: Request, res: Response): void => {
 
   res.status(200).json({
     success: true,
+    user: req.user,
     tenant: {
       id: req.tenant.tenantId,
       name: req.tenant.name,

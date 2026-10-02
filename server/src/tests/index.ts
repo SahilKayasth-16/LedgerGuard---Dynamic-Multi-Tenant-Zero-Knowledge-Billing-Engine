@@ -20,6 +20,8 @@ const testFiles = [
   'day19Dashboard.test.ts',
   'day20AnalyticsAudit.test.ts',
   'day21FinalIntegration.test.ts',
+  'day22SecurityAudit.test.ts',
+  'day23TraceLogging.test.ts',
 ];
 
 console.log(`\n>>> EXECUTING ALL ${testFiles.length} TEST SUITES FOR LEDGERGUARD <<<\n`);
@@ -44,4 +46,3 @@ for (const file of testFiles) {
 console.log('\n================================================================');
 console.log('🎉 ALL TEST SUITES PASSED SUCCESSFULLY!');
 console.log('================================================================\n');
-
