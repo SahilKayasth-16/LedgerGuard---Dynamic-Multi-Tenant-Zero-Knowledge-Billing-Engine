@@ -29,3 +29,4 @@ AnalyticsPage (/dashboard/analytics)
 2. **Race Condition Prevention**: `activeRangeRef` tracks current time range selection to ensure out-of-order API responses from rapid toggling (`7d` → `30d` → `90d`) do not overwrite the active UI state.
 3. **Session & Logout State Handling**: Auth token cleared on logout. Upon re-logging in as a different tenant, analytics state resets and fetches fresh tenant-scoped data.
 4. **Chart.js Integration**: Uses `react-chartjs-2` with registered `CategoryScale`, `LinearScale`, `PointElement`, `LineElement`, `Title`, `Tooltip`, `Legend`, and `Filler`. Renders continuous line plots with custom currency tooltips.
+

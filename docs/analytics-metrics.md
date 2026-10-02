@@ -41,3 +41,4 @@ This document specifies the authoritative business rules, domain boundaries, and
 ### 2. Usage & Spending Limits
 - **Status**: `NOT CONFIGURED` (`configured: false`)
 - **Rationale**: Tenant configuration models do not store custom monthly spending cap fields. LedgerGuard returns an explicit unconfigured status notice rather than inventing fake limit percentages.
+
