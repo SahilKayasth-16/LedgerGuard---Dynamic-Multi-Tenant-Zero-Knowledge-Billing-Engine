@@ -1,9 +1,77 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
+import { analyticsService } from '../services/analytics.service';
+import type {
+  SummaryMetrics,
+  TimeseriesMetrics,
+  BreakdownMetrics,
+  LimitsMetrics,
+} from '../services/analytics.service';
+import { AnalyticsSummary } from '../components/analytics/AnalyticsSummary';
+import { ExpenditureChart } from '../components/analytics/ExpenditureChart';
+import { TransactionDistributionChart } from '../components/analytics/TransactionDistributionChart';
+import { CostBreakdownCard } from '../components/analytics/CostBreakdownCard';
+import { UsageLimitCard } from '../components/analytics/UsageLimitCard';
+import { formatApiError } from '../utils/error';
 
-type TimeRangeOption = '7d' | '30d' | '90d' | 'custom';
+export type SupportedTimeRange = '7d' | '30d' | '90d';
 
 export const AnalyticsPage: React.FC = () => {
-  const [timeRange, setTimeRange] = useState<TimeRangeOption>('30d');
+  const [timeRange, setTimeRange] = useState<SupportedTimeRange>('30d');
+  const [loading, setLoading] = useState<boolean>(true);
+  const [errorInfo, setErrorInfo] = useState<{ message: string; traceId?: string } | null>(null);
+
+  const [summary, setSummary] = useState<SummaryMetrics | null>(null);
+  const [timeseries, setTimeseries] = useState<TimeseriesMetrics | null>(null);
+  const [breakdown, setBreakdown] = useState<BreakdownMetrics | null>(null);
+  const [limits, setLimits] = useState<LimitsMetrics | null>(null);
+
+  // Ref tracking in-flight request counter to prevent stale out-of-order responses
+  const requestIdRef = useRef<number>(0);
+
+  const fetchAnalytics = useCallback(async (selectedRange: SupportedTimeRange) => {
+    const currentRequestId = ++requestIdRef.current;
+    setLoading(true);
+    setErrorInfo(null);
+
+    try {
+      const [summaryRes, timeseriesRes, breakdownRes, limitsRes] = await Promise.all([
+        analyticsService.getSummaryMetrics(selectedRange),
+        analyticsService.getTimeseriesMetrics(selectedRange),
+        analyticsService.getBreakdownMetrics(selectedRange),
+        analyticsService.getLimitsMetrics(selectedRange),
+      ]);
+
+      // Guard against stale response if user switched range while request was in-flight
+      if (currentRequestId !== requestIdRef.current) {
+        return;
+      }
+
+      setSummary(summaryRes);
+      setTimeseries(timeseriesRes);
+      setBreakdown(breakdownRes);
+      setLimits(limitsRes);
+    } catch (err: any) {
+      if (currentRequestId !== requestIdRef.current) {
+        return;
+      }
+      const formatted = formatApiError(err);
+      setErrorInfo(formatted);
+    } finally {
+      if (currentRequestId === requestIdRef.current) {
+        setLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAnalytics(timeRange);
+  }, [timeRange, fetchAnalytics]);
+
+  const rangeLabels: Record<SupportedTimeRange, string> = {
+    '7d': '7 Days',
+    '30d': '30 Days',
+    '90d': '90 Days',
+  };
 
   return (
     <div style={{ maxWidth: '1080px', margin: '0 auto', paddingBottom: '2rem' }}>
@@ -35,7 +103,7 @@ export const AnalyticsPage: React.FC = () => {
           </p>
         </div>
 
-        {/* Time Range Selector */}
+        {/* Time Range Selector (7d, 30d, 90d supported by backend) */}
         <div
           style={{
             display: 'inline-flex',
@@ -45,18 +113,13 @@ export const AnalyticsPage: React.FC = () => {
             border: '1px solid #E2E8F0',
           }}
         >
-          {(['7d', '30d', '90d', 'custom'] as TimeRangeOption[]).map((range) => {
+          {(['7d', '30d', '90d'] as SupportedTimeRange[]).map((range) => {
             const isActive = timeRange === range;
-            const labels: Record<TimeRangeOption, string> = {
-              '7d': '7 Days',
-              '30d': '30 Days',
-              '90d': '90 Days',
-              custom: 'Custom Range',
-            };
             return (
               <button
                 key={range}
                 onClick={() => setTimeRange(range)}
+                disabled={loading && isActive}
                 style={{
                   padding: '0.375rem 0.75rem',
                   fontSize: '0.8125rem',
@@ -66,334 +129,102 @@ export const AnalyticsPage: React.FC = () => {
                   border: 'none',
                   borderRadius: '6px',
                   boxShadow: isActive ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
-                  cursor: 'pointer',
+                  cursor: loading && isActive ? 'not-allowed' : 'pointer',
                   transition: 'all 0.15s ease',
+                  opacity: loading && isActive ? 0.7 : 1,
                 }}
               >
-                {labels[range]}
+                {rangeLabels[range]}
               </button>
             );
           })}
         </div>
       </div>
 
+      {/* Error Banner with Retry */}
+      {errorInfo && (
+        <div
+          style={{
+            padding: '1rem 1.25rem',
+            backgroundColor: '#FEF2F2',
+            border: '1px solid #FCA5A5',
+            color: '#991B1B',
+            borderRadius: '8px',
+            marginBottom: '1.5rem',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '0.75rem',
+          }}
+        >
+          <div>
+            <span style={{ fontSize: '0.875rem', fontWeight: 600 }}>
+              {errorInfo.message}
+            </span>
+            {errorInfo.traceId && (
+              <div style={{ fontSize: '0.75rem', color: '#B91C1C', marginTop: '0.25rem' }}>
+                Reference ID: <code>{errorInfo.traceId}</code>
+              </div>
+            )}
+          </div>
+          <button
+            onClick={() => fetchAnalytics(timeRange)}
+            disabled={loading}
+            style={{
+              padding: '0.375rem 0.75rem',
+              backgroundColor: '#DC2626',
+              color: '#FFFFFF',
+              border: 'none',
+              borderRadius: '6px',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              cursor: loading ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {loading ? 'Retrying...' : 'Retry Analytics'}
+          </button>
+        </div>
+      )}
+
       {/* Metric Cards Grid */}
+      <AnalyticsSummary summary={summary} loading={loading} />
+
+      {/* Real Chart.js Visualizations Grid */}
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))',
-          gap: '1.25rem',
-          marginBottom: '2rem',
-        }}
-      >
-        {/* Card 1: Total Expenditure */}
-        <div
-          style={{
-            padding: '1.25rem',
-            backgroundColor: '#FFFFFF',
-            borderRadius: '8px',
-            border: '1px solid #E2E8F0',
-            boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span
-              style={{
-                fontSize: '0.75rem',
-                fontWeight: 600,
-                color: '#64748B',
-                textTransform: 'uppercase',
-                letterSpacing: '0.05em',
-              }}
-            >
-              Total Expenditure
-            </span>
-            <span
-              style={{
-                fontSize: '0.6875rem',
-                padding: '0.15rem 0.4rem',
-                backgroundColor: '#EFF6FF',
-                color: '#1D4ED8',
-                borderRadius: '4px',
-                fontWeight: 600,
-              }}
-            >
-              Day 16 Pipeline
-            </span>
-          </div>
-          <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#94A3B8', marginTop: '0.75rem' }}>
-            --
-          </div>
-          <p style={{ fontSize: '0.75rem', color: '#64748B', marginTop: '0.5rem', marginBottom: 0 }}>
-            Contract Defined — Backend Query Pending (Day 16)
-          </p>
-        </div>
-
-        {/* Card 2: Total Transactions */}
-        <div
-          style={{
-            padding: '1.25rem',
-            backgroundColor: '#FFFFFF',
-            borderRadius: '8px',
-            border: '1px solid #E2E8F0',
-            boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span
-              style={{
-                fontSize: '0.75rem',
-                fontWeight: 600,
-                color: '#64748B',
-                textTransform: 'uppercase',
-                letterSpacing: '0.05em',
-              }}
-            >
-              Total Transactions
-            </span>
-            <span
-              style={{
-                fontSize: '0.6875rem',
-                padding: '0.15rem 0.4rem',
-                backgroundColor: '#EFF6FF',
-                color: '#1D4ED8',
-                borderRadius: '4px',
-                fontWeight: 600,
-              }}
-            >
-              Day 16 Pipeline
-            </span>
-          </div>
-          <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#94A3B8', marginTop: '0.75rem' }}>
-            --
-          </div>
-          <p style={{ fontSize: '0.75rem', color: '#64748B', marginTop: '0.5rem', marginBottom: 0 }}>
-            Contract Defined — Backend Query Pending (Day 16)
-          </p>
-        </div>
-
-        {/* Card 3: Successful Transactions */}
-        <div
-          style={{
-            padding: '1.25rem',
-            backgroundColor: '#FFFFFF',
-            borderRadius: '8px',
-            border: '1px solid #E2E8F0',
-            boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span
-              style={{
-                fontSize: '0.75rem',
-                fontWeight: 600,
-                color: '#64748B',
-                textTransform: 'uppercase',
-                letterSpacing: '0.05em',
-              }}
-            >
-              Successful Expenditure
-            </span>
-            <span
-              style={{
-                fontSize: '0.6875rem',
-                padding: '0.15rem 0.4rem',
-                backgroundColor: '#F0FDF4',
-                color: '#15803D',
-                borderRadius: '4px',
-                fontWeight: 600,
-              }}
-            >
-              Day 16 Pipeline
-            </span>
-          </div>
-          <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#94A3B8', marginTop: '0.75rem' }}>
-            --
-          </div>
-          <p style={{ fontSize: '0.75rem', color: '#64748B', marginTop: '0.5rem', marginBottom: 0 }}>
-            Contract Defined — Backend Query Pending (Day 16)
-          </p>
-        </div>
-
-        {/* Card 4: Failed Transactions */}
-        <div
-          style={{
-            padding: '1.25rem',
-            backgroundColor: '#FFFFFF',
-            borderRadius: '8px',
-            border: '1px solid #E2E8F0',
-            boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span
-              style={{
-                fontSize: '0.75rem',
-                fontWeight: 600,
-                color: '#64748B',
-                textTransform: 'uppercase',
-                letterSpacing: '0.05em',
-              }}
-            >
-              Failed Transactions
-            </span>
-            <span
-              style={{
-                fontSize: '0.6875rem',
-                padding: '0.15rem 0.4rem',
-                backgroundColor: '#FEF2F2',
-                color: '#B91C1C',
-                borderRadius: '4px',
-                fontWeight: 600,
-              }}
-            >
-              Day 16 Pipeline
-            </span>
-          </div>
-          <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#94A3B8', marginTop: '0.75rem' }}>
-            --
-          </div>
-          <p style={{ fontSize: '0.75rem', color: '#64748B', marginTop: '0.5rem', marginBottom: 0 }}>
-            Contract Defined — Backend Query Pending (Day 16)
-          </p>
-        </div>
-      </div>
-
-      {/* Reserved Visualization Grid */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(450px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
           gap: '1.5rem',
           marginBottom: '2rem',
         }}
       >
-        {/* Expenditure Trend Visualization Area */}
-        <div
-          style={{
-            padding: '1.5rem',
-            backgroundColor: '#FFFFFF',
-            borderRadius: '8px',
-            border: '1px solid #E2E8F0',
-            boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
-          }}
-        >
-          <div style={{ marginBottom: '1rem' }}>
-            <h3 style={{ fontSize: '1rem', fontWeight: 600, color: '#1E293B', margin: 0 }}>
-              Expenditure Trend over Time ({timeRange.toUpperCase()})
-            </h3>
-            <p style={{ fontSize: '0.75rem', color: '#64748B', margin: '0.25rem 0 0 0' }}>
-              Daily aggregation of completed debits
-            </p>
-          </div>
-          <div
-            style={{
-              height: '220px',
-              backgroundColor: '#F8FAFC',
-              borderRadius: '6px',
-              border: '1px dashed #CBD5E1',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              textAlign: 'center',
-              padding: '1rem',
-            }}
-          >
-            <div
-              style={{
-                fontSize: '0.8125rem',
-                fontWeight: 600,
-                color: '#475569',
-                backgroundColor: '#F1F5F9',
-                padding: '0.375rem 0.75rem',
-                borderRadius: '16px',
-                marginBottom: '0.5rem',
-              }}
-            >
-              Chart.js Visualization Area
-            </div>
-            <p style={{ fontSize: '0.75rem', color: '#64748B', maxWidth: '340px', margin: 0 }}>
-              MongoDB aggregation pipeline will be implemented in Day 16. Chart renderers added in Day 18.
-            </p>
-          </div>
-        </div>
+        {/* Chart 1: Expenditure Line Chart */}
+        <ExpenditureChart
+          data={timeseries}
+          loading={loading}
+          timeRangeLabel={rangeLabels[timeRange]}
+        />
 
-        {/* Transaction Distribution Visualization Area */}
-        <div
-          style={{
-            padding: '1.5rem',
-            backgroundColor: '#FFFFFF',
-            borderRadius: '8px',
-            border: '1px solid #E2E8F0',
-            boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
-          }}
-        >
-          <div style={{ marginBottom: '1rem' }}>
-            <h3 style={{ fontSize: '1rem', fontWeight: 600, color: '#1E293B', margin: 0 }}>
-              Transaction Distribution by Type
-            </h3>
-            <p style={{ fontSize: '0.75rem', color: '#64748B', margin: '0.25rem 0 0 0' }}>
-              Committed volume ratio (Debits vs Credits)
-            </p>
-          </div>
-          <div
-            style={{
-              height: '220px',
-              backgroundColor: '#F8FAFC',
-              borderRadius: '6px',
-              border: '1px dashed #CBD5E1',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              textAlign: 'center',
-              padding: '1rem',
-            }}
-          >
-            <div
-              style={{
-                fontSize: '0.8125rem',
-                fontWeight: 600,
-                color: '#475569',
-                backgroundColor: '#F1F5F9',
-                padding: '0.375rem 0.75rem',
-                borderRadius: '16px',
-                marginBottom: '0.5rem',
-              }}
-            >
-              Breakdown Chart Area
-            </div>
-            <p style={{ fontSize: '0.75rem', color: '#64748B', maxWidth: '340px', margin: 0 }}>
-              Breakdown & grouping pipelines will be implemented in Day 17. Chart renderers added in Day 18.
-            </p>
-          </div>
-        </div>
+        {/* Chart 2: Transaction Distribution Doughnut Chart */}
+        <TransactionDistributionChart
+          summary={summary}
+          loading={loading}
+          timeRangeLabel={rangeLabels[timeRange]}
+        />
       </div>
 
-      {/* Contract & Schema Limitations Notice */}
+      {/* Breakdown & Limits Info Grid */}
       <div
         style={{
-          padding: '1.25rem 1.5rem',
-          backgroundColor: '#F8FAFC',
-          borderRadius: '8px',
-          border: '1px solid #E2E8F0',
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+          gap: '1.5rem',
+          marginBottom: '2rem',
         }}
       >
-        <h4 style={{ fontSize: '0.875rem', fontWeight: 600, color: '#334155', marginTop: 0, marginBottom: '0.5rem' }}>
-          Analytics Contract & Domain Boundaries (Day 15)
-        </h4>
-        <ul style={{ margin: 0, paddingLeft: '1.25rem', color: '#64748B', fontSize: '0.8125rem', lineHeight: '1.6' }}>
-          <li>
-            <strong>Data Authority:</strong> Metrics are strictly calculated from committed ledger entries (<code>status: 'completed'</code>) isolated per tenant.
-          </li>
-          <li>
-            <strong>Schema Limitations Documented:</strong> Resource-level spending categories and tenant budget limits are documented as schema limitations in <code>docs/analytics-metrics.md</code>.
-          </li>
-          <li>
-            <strong>Security Invariant:</strong> Tenant isolation is strictly enforced via JWT authentication context.
-          </li>
-        </ul>
+        <CostBreakdownCard breakdown={breakdown} loading={loading} />
+        <UsageLimitCard limits={limits} loading={loading} />
       </div>
     </div>
   );
