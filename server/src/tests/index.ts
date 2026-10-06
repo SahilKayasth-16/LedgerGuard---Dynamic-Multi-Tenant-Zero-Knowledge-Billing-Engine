@@ -24,6 +24,7 @@ const testFiles = [
   'day23TraceLogging.test.ts',
   'day24SecurityHardening.test.ts',
   'day26AnalyticsPolish.test.ts',
+  'day27FullSystemIntegration.test.ts',
 ];
 
 console.log(`\n>>> EXECUTING ALL ${testFiles.length} TEST SUITES FOR LEDGERGUARD <<<\n`);
